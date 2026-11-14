@@ -5,7 +5,7 @@ import { execSync } from "node:child_process";
 
 const nextVersion = process.argv[2];
 if (!nextVersion || !/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(nextVersion)) {
-  console.error("Usage: node scripts/release.mjs <semver> (e.g., 2.0.1)");
+  console.error("Usage: node scripts/release.mjs <semver> (e.g., 1.0.0)");
   process.exit(1);
 }
 
@@ -38,11 +38,16 @@ try {
   execSync(`git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml`, {
     stdio: "inherit",
   });
-  execSync(`git commit -m "chore(release): v${nextVersion}"`, {
-    stdio: "inherit",
-  });
-  execSync(`git tag v${nextVersion}`, { stdio: "inherit" });
-  console.log(`Created git tag v${nextVersion}. Run 'git push && git push --tags' to publish.`);
-} catch {
-  console.log("Version files updated (git commit/tag skipped).");
+  const staged = execSync(`git status --porcelain`).toString().trim();
+  if (staged.length > 0) {
+    execSync(`git commit -m "chore(release): v${nextVersion}"`, {
+      stdio: "inherit",
+    });
+  }
+  execSync(`git tag -f v${nextVersion}`, { stdio: "inherit" });
+  console.log(
+    `Created/updated git tag v${nextVersion} at HEAD. Run 'git push origin main && git push origin v${nextVersion} --force' to publish.`
+  );
+} catch (err) {
+  console.log("Version files updated (git commit/tag skipped):", err.message);
 }
