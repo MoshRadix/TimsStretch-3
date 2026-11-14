@@ -43,7 +43,10 @@
       "timestampUrl": "",
       "signCommand": {
         "cmd": "cmd",
-        "args": ["/C", "if exist sign.cmd (call sign.cmd \"%1\") else (exit /b 0)"]
+        "args": [
+          "/C",
+          "if exist sign.cmd (call sign.cmd \"%1\") else (exit /b 0)"
+        ]
       }
     }
   },
