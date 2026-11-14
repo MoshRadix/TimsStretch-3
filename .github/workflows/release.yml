@@ -10,7 +10,33 @@ permissions:
   contents: write
 
 jobs:
+  create-release:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure GitHub Release Exists for Tag
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v${VERSION}"
+          echo "Checking release ${TAG}..."
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists."
+          else
+            echo "Creating release ${TAG}..."
+            gh release create "${TAG}" \
+              --title "M0SH TimeStretch 3 ${TAG}" \
+              --notes-file RELEASE_NOTES.md \
+              --target "${GITHUB_SHA}"
+          fi
+
   publish-tauri:
+    needs: create-release
     permissions:
       contents: write
     strategy:
@@ -80,13 +106,13 @@ jobs:
       - name: Build and Publish Tauri Bundles + Updater Manifest
         uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: v__VERSION__
-          releaseName: "TimeStretch 3 v__VERSION__"
-          releaseBody: "Automated multi-platform release of TimeStretch 3 desktop audio workstation."
+          releaseName: "M0SH TimeStretch 3 v__VERSION__"
+          releaseBody: "Automated multi-platform release of M0SH TimeStretch 3 desktop audio workstation."
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
