@@ -47,6 +47,34 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Setup Windows Authenticode Signing (M0sh.pfx & sign.cmd)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          PFX_PASS: ${{ secrets.WINDOWS_PFX_PASSWORD || secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_PFX_BASE64)) {
+            $pfxBytes = [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64.Trim())
+            $pfxPath = Join-Path $PWD "src-tauri\M0sh.pfx"
+            [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
+
+            $signCmdContent = @(
+              '@echo off',
+              'setlocal',
+              'set "PFX_PATH=%~dp0M0sh.pfx"',
+              "set `"PFX_PASS=$($env:PFX_PASS)`"",
+              'set "SIGNTOOL=signtool.exe"',
+              'for /f "delims=" %%F in (''dir /b /s "C:\Program Files (x86)\Windows Kits\10\bin\*signtool.exe" 2^>nul ^| findstr /i "\\x64\\signtool.exe"'') do set "SIGNTOOL=%%F"',
+              '"%SIGNTOOL%" sign /f "%PFX_PATH%" /p "%PFX_PASS%" /fd sha256 "%~1"',
+              'exit /b %ERRORLEVEL%'
+            ) -join "`r`n"
+            Set-Content -Path (Join-Path $PWD "src-tauri\sign.cmd") -Value $signCmdContent -Encoding ASCII
+            Write-Host "Restored src-tauri/M0sh.pfx and src-tauri/sign.cmd for Authenticode signing."
+          } else {
+            Write-Warning "WINDOWS_PFX_BASE64 secret not set; skipping Windows Authenticode signing."
+          }
+
       - name: Build and Publish Tauri Bundles + Updater Manifest
         uses: tauri-apps/tauri-action@v0
         env:
