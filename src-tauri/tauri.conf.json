@@ -1,0 +1,62 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "TimeStretch 3",
+  "version": "1.0.0",
+  "identifier": "com.moshradix.timestretch3",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "M0SH TimeStretch 3",
+        "width": 1340,
+        "height": 860,
+        "minWidth": 1020,
+        "minHeight": 680,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "certificateThumbprint": "28441103D7B7767E989A4291C16EAD8D192DC571",
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "",
+      "signCommand": {
+        "cmd": "cmd",
+        "args": ["/C", "if exist sign.cmd (call sign.cmd \"%1\") else (exit /b 0)"]
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI2REY1NkQ0ODZDMEI3QUYKUldTdnQ4Q0cxRmJmdGxvOUJZUEpsWFZzeUxMMUdvUU9BMUEzMnRWdjkwMGp3eDdmcy9iS1NxUVMK",
+      "endpoints": [
+        "https://github.com/MoshRadix/TimsStretch-3/releases/latest/download/latest.json",
+        "https://github.com/MoshRadix/mosh-timestretch-3/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

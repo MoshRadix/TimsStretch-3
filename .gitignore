@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Frontend build output
+dist/
+dist-ssr/
+
+# Rust / Tauri build & release artifacts (executables, MSI/NSIS installers, bundles)
+src-tauri/target/
+
+# Code signing & sensitive credentials
+src-tauri/sign.cmd
+src-tauri/*.pfx
+src-tauri/*.p12
+src-tauri/*.pem
+src-tauri/*.key
+src-tauri/tauri-updater.key*
+.env
+.env.*
+
+# OS / Editor files
+.DS_Store
+*.local

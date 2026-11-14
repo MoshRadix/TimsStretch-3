@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default capability for M0SH TimeStretch main window","local":true,"windows":["main"],"permissions":["core:default","dialog:default","global-shortcut:default","process:default","updater:default"]}}
