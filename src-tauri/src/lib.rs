@@ -4,7 +4,7 @@ pub mod waveform;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
@@ -347,26 +347,48 @@ async fn save_wav_recording(
     };
 
     tokio::task::spawn_blocking(move || -> Result<SaveFileResult, String> {
-        let spec = hound::WavSpec {
-            channels: 1,
-            sample_rate: sample_rate.max(8000),
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
+        let sr = sample_rate.max(8000);
+        let num_channels: u16 = 1;
+        let bits_per_sample: u16 = 16;
+        let bytes_per_sample: u16 = bits_per_sample / 8;
+        let block_align: u16 = num_channels * bytes_per_sample;
+        let byte_rate: u32 = sr * (block_align as u32);
+        let data_size: u32 = (pcm_samples.len() as u64 * 2).min(u32::MAX as u64 - 44) as u32;
+        let riff_size: u32 = 36 + data_size;
 
-        let mut writer = hound::WavWriter::create(&dest_path, spec)
+        let file = File::create(&dest_path)
             .map_err(|e| format!("Failed to create WAV file: {}", e))?;
+        let mut writer = BufWriter::with_capacity(64 * 1024, file);
+
+        let mut header = [0u8; 44];
+        header[0..4].copy_from_slice(b"RIFF");
+        header[4..8].copy_from_slice(&riff_size.to_le_bytes());
+        header[8..12].copy_from_slice(b"WAVE");
+        header[12..16].copy_from_slice(b"fmt ");
+        header[16..20].copy_from_slice(&16u32.to_le_bytes());
+        header[20..22].copy_from_slice(&1u16.to_le_bytes()); // PCM = 1
+        header[22..24].copy_from_slice(&num_channels.to_le_bytes());
+        header[24..28].copy_from_slice(&sr.to_le_bytes());
+        header[28..32].copy_from_slice(&byte_rate.to_le_bytes());
+        header[32..34].copy_from_slice(&block_align.to_le_bytes());
+        header[34..36].copy_from_slice(&bits_per_sample.to_le_bytes());
+        header[36..40].copy_from_slice(b"data");
+        header[40..44].copy_from_slice(&data_size.to_le_bytes());
+
+        writer
+            .write_all(&header)
+            .map_err(|e| format!("Failed to write WAV header: {}", e))?;
 
         for &sample in &pcm_samples {
             let clamped = sample.clamp(-1.0, 1.0);
             let pcm16 = (clamped * 32767.0).round() as i16;
             writer
-                .write_sample(pcm16)
+                .write_all(&pcm16.to_le_bytes())
                 .map_err(|e| format!("Failed to write WAV sample: {}", e))?;
         }
 
         writer
-            .finalize()
+            .flush()
             .map_err(|e| format!("Failed to finalize WAV file: {}", e))?;
 
         Ok(SaveFileResult {

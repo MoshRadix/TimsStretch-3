@@ -1,15 +1,14 @@
 use rayon::prelude::*;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, UNIX_EPOCH};
-use symphonia::core::audio::SampleBuffer;
+use symphonia::core::audio::{AudioBufferRef, SampleBuffer, Signal};
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::FormatOptions;
-use symphonia::core::io::MediaSourceStream;
+use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use tauri::{AppHandle, Emitter, Manager};
@@ -22,6 +21,22 @@ pub struct WaveformProgressPayload {
     pub partial_peaks: Vec<f32>,
 }
 
+fn fnv1a_128(chunks: &[&[u8]]) -> String {
+    let mut h1: u64 = 0xcbf29ce484222325;
+    let mut h2: u64 = 0x84222325cbf29ce4;
+    let mut idx: u64 = 0;
+    for slice in chunks {
+        for &b in *slice {
+            h1 ^= b as u64;
+            h1 = h1.wrapping_mul(0x100000001b3);
+            h2 ^= (b as u64).wrapping_add(idx);
+            h2 = h2.wrapping_mul(0x100000001b3);
+            idx = idx.wrapping_add(1);
+        }
+    }
+    format!("{:016x}{:016x}", h1, h2)
+}
+
 fn compute_cache_path(app: &AppHandle, file_path: &Path, bins: usize) -> Option<PathBuf> {
     let meta = fs::metadata(file_path).ok()?;
     let size = meta.len();
@@ -32,12 +47,16 @@ fn compute_cache_path(app: &AppHandle, file_path: &Path, bins: usize) -> Option<
         .map(|d| d.as_millis())
         .unwrap_or(0);
 
-    let mut hasher = Sha256::new();
-    hasher.update(file_path.to_string_lossy().as_bytes());
-    hasher.update(size.to_le_bytes());
-    hasher.update(mtime_ms.to_le_bytes());
-    hasher.update((bins as u64).to_le_bytes());
-    let digest = hex::encode(hasher.finalize());
+    let path_str = file_path.to_string_lossy();
+    let size_bytes = size.to_le_bytes();
+    let mtime_bytes = mtime_ms.to_le_bytes();
+    let bins_bytes = (bins as u64).to_le_bytes();
+    let digest = fnv1a_128(&[
+        path_str.as_bytes(),
+        &size_bytes,
+        &mtime_bytes,
+        &bins_bytes,
+    ]);
 
     let cache_dir = app.path().app_cache_dir().ok()?.join("waveforms");
     let _ = fs::create_dir_all(&cache_dir);
@@ -165,34 +184,32 @@ fn try_fast_wav_peaks(file_path: &Path, bins: usize) -> Option<Vec<f32>> {
     let read_frames = frames_per_bin.min(max_sample_frames_per_bin);
     let read_bytes = read_frames * frame_size;
 
-    let mut raw_windows: Vec<Vec<u8>> = Vec::with_capacity(bins);
+    // Single reusable buffer across all bins (zero per-bin heap allocations)
+    let mut buf = vec![0u8; read_bytes];
+    let mut raw_peaks: Vec<f32> = Vec::with_capacity(bins);
+
     for bin_idx in 0..bins {
         let start_frame = bin_idx * frames_per_bin;
         let byte_pos = data_offset + (start_frame * frame_size) as u64;
         if byte_pos >= data_offset + data_size {
-            raw_windows.push(Vec::new());
+            raw_peaks.push(0.0);
             continue;
         }
         let avail = ((data_offset + data_size) - byte_pos) as usize;
         let to_read = read_bytes.min(avail) / frame_size * frame_size;
-        let mut buf = vec![0u8; to_read];
-        if file.seek(SeekFrom::Start(byte_pos)).is_ok() && file.read_exact(&mut buf).is_ok() {
-            raw_windows.push(buf);
-        } else {
-            raw_windows.push(Vec::new());
+        if to_read == 0 {
+            raw_peaks.push(0.0);
+            continue;
         }
-    }
-
-    let raw_peaks: Vec<f32> = raw_windows
-        .par_iter()
-        .map(|buf| {
+        let slice = &mut buf[..to_read];
+        if file.seek(SeekFrom::Start(byte_pos)).is_ok() && file.read_exact(slice).is_ok() {
             let mut max_abs = 0.0f32;
-            for sample_bytes in buf.chunks_exact(bytes_per_sample) {
+            for sample_bytes in slice.chunks_exact(bytes_per_sample) {
                 let amp = match (audio_format, bytes_per_sample) {
-                    (1, 1) => ((sample_bytes[0] as f32 - 128.0) / 128.0).abs(),
+                    (1, 1) => ((sample_bytes[0] as f32 - 128.0) * (1.0 / 128.0)).abs(),
                     (1, 2) => {
                         let v = i16::from_le_bytes([sample_bytes[0], sample_bytes[1]]);
-                        (v as f32 / 32768.0).abs()
+                        (v as f32 * (1.0 / 32768.0)).abs()
                     }
                     (1, 3) => {
                         let sign_byte = if sample_bytes[2] & 0x80 != 0 { 0xFF } else { 0x00 };
@@ -202,7 +219,7 @@ fn try_fast_wav_peaks(file_path: &Path, bins: usize) -> Option<Vec<f32>> {
                             sample_bytes[2],
                             sign_byte,
                         ]);
-                        (v as f32 / 8_388_608.0).abs()
+                        (v as f32 * (1.0 / 8_388_608.0)).abs()
                     }
                     (1, 4) => {
                         let v = i32::from_le_bytes([
@@ -211,7 +228,7 @@ fn try_fast_wav_peaks(file_path: &Path, bins: usize) -> Option<Vec<f32>> {
                             sample_bytes[2],
                             sample_bytes[3],
                         ]);
-                        (v as f32 / 2_147_483_648.0).abs()
+                        (v as f32 * (1.0 / 2_147_483_648.0)).abs()
                     }
                     (3, 4) => {
                         let v = f32::from_le_bytes([
@@ -232,11 +249,78 @@ fn try_fast_wav_peaks(file_path: &Path, bins: usize) -> Option<Vec<f32>> {
                     max_abs = amp;
                 }
             }
-            max_abs
-        })
-        .collect();
+            raw_peaks.push(max_abs);
+        } else {
+            raw_peaks.push(0.0);
+        }
+    }
 
     Some(normalize_percentile_99(&raw_peaks, bins))
+}
+
+#[inline]
+fn extract_audio_buf_peak(
+    audio_buf: AudioBufferRef<'_>,
+    fallback_buf: &mut Option<SampleBuffer<f32>>,
+) -> f32 {
+    match audio_buf {
+        AudioBufferRef::F32(buf) => {
+            let mut max_v = 0.0f32;
+            for ch in 0..buf.spec().channels.count() {
+                for &s in buf.chan(ch) {
+                    let a = s.abs();
+                    if a > max_v {
+                        max_v = a;
+                    }
+                }
+            }
+            max_v
+        }
+        AudioBufferRef::S16(buf) => {
+            let mut max_i: i32 = 0;
+            for ch in 0..buf.spec().channels.count() {
+                for &s in buf.chan(ch) {
+                    let a = (s as i32).abs();
+                    if a > max_i {
+                        max_i = a;
+                    }
+                }
+            }
+            max_i as f32 * (1.0 / 32768.0)
+        }
+        AudioBufferRef::S32(buf) => {
+            let mut max_f = 0.0f32;
+            for ch in 0..buf.spec().channels.count() {
+                for &s in buf.chan(ch) {
+                    let a = (s as f32 * (1.0 / 2_147_483_648.0)).abs();
+                    if a > max_f {
+                        max_f = a;
+                    }
+                }
+            }
+            max_f
+        }
+        other => {
+            let frames = other.frames() as u64;
+            let spec = *other.spec();
+            let sb = match fallback_buf {
+                Some(b) if b.capacity() >= (frames as usize) * spec.channels.count() => b,
+                _ => {
+                    *fallback_buf = Some(SampleBuffer::<f32>::new(frames.max(4096), spec));
+                    fallback_buf.as_mut().unwrap()
+                }
+            };
+            sb.copy_interleaved_ref(other);
+            let mut max_v = 0.0f32;
+            for &s in sb.samples() {
+                let a = s.abs();
+                if a > max_v {
+                    max_v = a;
+                }
+            }
+            max_v
+        }
+    }
 }
 
 /// Bounded streaming decoder using Symphonia + Rayon with throttled live progress events.
@@ -289,7 +373,12 @@ pub fn compute_waveform_streaming(
     }
 
     let file = File::open(path).map_err(|e| format!("Failed to open audio file: {}", e))?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mss = MediaSourceStream::new(
+        Box::new(file),
+        MediaSourceStreamOptions {
+            buffer_len: 256 * 1024,
+        },
+    );
 
     let mut hint = Hint::new();
     if !ext.is_empty() {
@@ -313,13 +402,23 @@ pub fn compute_waveform_streaming(
     let track_id = track.id;
     let estimated_total_frames = track.codec_params.n_frames;
 
+    // For long tracks, stride packet decoding so we decode ~4,096 packets across the file
+    let packet_stride: usize = if let Some(total_f) = estimated_total_frames {
+        let est_packets = (total_f / 1152) as usize;
+        (est_packets / 4096).clamp(1, 8)
+    } else {
+        1
+    };
+
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| format!("Failed to create audio decoder: {}", e))?;
 
-    // Collect packet peak micro-blocks without keeping decoded PCM in memory
-    let mut packet_peaks: Vec<f32> = Vec::with_capacity(8192);
+    // Collect packet peak micro-blocks with zero per-packet heap allocations
+    let mut packet_peaks: Vec<f32> = Vec::with_capacity(4096);
+    let mut fallback_sample_buf: Option<SampleBuffer<f32>> = None;
     let mut decoded_frames: u64 = 0;
+    let mut packet_counter: usize = 0;
     let mut last_emit = Instant::now();
 
     loop {
@@ -341,33 +440,25 @@ pub fn compute_waveform_streaming(
             continue;
         }
 
+        let pkt_dur = packet.dur();
+        decoded_frames += pkt_dur;
+        packet_counter = packet_counter.wrapping_add(1);
+
+        if packet_stride > 1 && (packet_counter % packet_stride) != 1 {
+            continue;
+        }
+
         match decoder.decode(&packet) {
             Ok(audio_buf) => {
-                let spec = *audio_buf.spec();
                 let frames = audio_buf.frames();
                 if frames == 0 {
                     continue;
                 }
-                decoded_frames += frames as u64;
+                if pkt_dur == 0 {
+                    decoded_frames += frames as u64;
+                }
 
-                let mut sample_buf = SampleBuffer::<f32>::new(frames as u64, spec);
-                sample_buf.copy_interleaved_ref(audio_buf);
-                let samples = sample_buf.samples();
-
-                let peak = samples
-                    .par_chunks(2048)
-                    .map(|chunk| {
-                        let mut local_max = 0.0f32;
-                        for &s in chunk {
-                            let a = s.abs();
-                            if a > local_max {
-                                local_max = a;
-                            }
-                        }
-                        local_max
-                    })
-                    .reduce(|| 0.0f32, f32::max);
-
+                let peak = extract_audio_buf_peak(audio_buf, &mut fallback_sample_buf);
                 packet_peaks.push(peak);
 
                 if last_emit.elapsed().as_millis() >= 100 {

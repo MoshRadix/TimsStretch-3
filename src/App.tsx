@@ -317,12 +317,13 @@ export default function App() {
   }>({ start: 0, end: 0, direction: "none" });
   const [langMode, setLangMode] = useState<LanguageMode>("dv");
   const [fontSize, setFontSize] = useState<number>(16);
-  const [transcript, setTranscript] = useState<string>(() => {
-    return localStorage.getItem("m0sh-transcript:default") ?? "";
-  });
+  const [transcript, setTranscript] = useState<string>("");
   const [copiedBanner, setCopiedBanner] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string>("Ready · 100% Local On-Device");
   const autosaveTimerRef = useRef<number | null>(null);
+  const activeFileKeyRef = useRef<string>("unloaded");
+  const isHydratingTrackRef = useRef<boolean>(false);
+  const lastPosSaveMsRef = useRef<number>(0);
 
   // Shortcuts & Self-Updater State
   const [shortcuts, setShortcuts] = useState<ShortcutMap>(() => {
@@ -462,20 +463,81 @@ export default function App() {
     restoreEditorFocus,
   ]);
 
-  // Compute unique storage key per file
-  const currentFileKey = useMemo(() => {
-    if (!currentTrack) return "default";
-    return `${currentTrack.path}:${currentTrack.size}`;
-  }, [currentTrack]);
+  // Compute normalized unique storage key per audio file
+  const getNormalizedFileKey = useCallback((track: AudioFileInfo | null): string => {
+    if (!track) return "unloaded";
+    const normPath = (track.path || track.name)
+      .trim()
+      .toLowerCase()
+      .replace(/\\/g, "/");
+    return `${normPath}:${track.size}`;
+  }, []);
 
-  // Debounced 300ms Transcript Autosave
+  const currentFileKey = useMemo(
+    () => getNormalizedFileKey(currentTrack),
+    [currentTrack, getNormalizedFileKey]
+  );
+
+  // Keep latest state in a ref so outgoing file state can be flushed synchronously before switching tracks
+  const latestPerFileStateRef = useRef({
+    transcript,
+    dsp,
+    bookmarks,
+    langMode,
+    fontSize,
+    loopEnabled,
+  });
+  latestPerFileStateRef.current = {
+    transcript,
+    dsp,
+    bookmarks,
+    langMode,
+    fontSize,
+    loopEnabled,
+  };
+
+  const flushFileStateToStorage = useCallback(
+    (fileKey: string, overridePos?: number) => {
+      if (!fileKey) return;
+      const st = latestPerFileStateRef.current;
+      try {
+        localStorage.setItem(`m0sh-transcript:${fileKey}`, st.transcript);
+        if (fileKey !== "unloaded") {
+          localStorage.setItem(
+            `m0sh-dsp:${fileKey}`,
+            JSON.stringify({
+              dsp: st.dsp,
+              bookmarks: st.bookmarks,
+              langMode: st.langMode,
+              fontSize: st.fontSize,
+              loopEnabled: st.loopEnabled,
+            })
+          );
+          localStorage.setItem(`m0sh-lang:${fileKey}`, st.langMode);
+          const pos =
+            overridePos !== undefined
+              ? overridePos
+              : audioRef.current?.currentTime ?? currentTimeRef.current;
+          if (Number.isFinite(pos) && pos >= 0) {
+            localStorage.setItem(`m0sh-pos:${fileKey}`, String(pos));
+          }
+        }
+      } catch {
+        // Ignore storage quota errors
+      }
+    },
+    []
+  );
+
+  // Debounced 300ms Per-File Transcript Autosave
   useEffect(() => {
+    if (isHydratingTrackRef.current) return;
+    const targetKey = currentFileKey;
     if (autosaveTimerRef.current) {
       window.clearTimeout(autosaveTimerRef.current);
     }
     autosaveTimerRef.current = window.setTimeout(() => {
-      localStorage.setItem("m0sh-transcript:default", transcript);
-      localStorage.setItem(`m0sh-transcript:${currentFileKey}`, transcript);
+      localStorage.setItem(`m0sh-transcript:${targetKey}`, transcript);
       const nowStr = new Date().toLocaleTimeString([], {
         hour: "2-digit",
         minute: "2-digit",
@@ -491,15 +553,15 @@ export default function App() {
     };
   }, [transcript, currentFileKey]);
 
-  // Persist per-file DSP, Bookmarks & Transcription Language Mode
+  // Persist per-file DSP, Bookmarks, Language Mode, Font Size & Loop State
   useEffect(() => {
-    if (!currentTrack) return;
+    if (!currentTrack || isHydratingTrackRef.current) return;
     localStorage.setItem(
       `m0sh-dsp:${currentFileKey}`,
-      JSON.stringify({ dsp, bookmarks, langMode })
+      JSON.stringify({ dsp, bookmarks, langMode, fontSize, loopEnabled })
     );
     localStorage.setItem(`m0sh-lang:${currentFileKey}`, langMode);
-  }, [dsp, bookmarks, langMode, currentTrack, currentFileKey]);
+  }, [dsp, bookmarks, langMode, fontSize, loopEnabled, currentTrack, currentFileKey]);
 
   // Initialize Web Audio Engine
   useEffect(() => {
@@ -512,58 +574,123 @@ export default function App() {
     engineRef.current?.applyAllSettings(dsp);
   }, [dsp]);
 
-  // Load Track Helper
+  // Load Track Helper — Saves outgoing track state and restores incoming track's isolated transcript & settings
   const loadAudioFileInfo = useCallback(
-    async (info: AudioFileInfo, initialPosition = 0) => {
-      const fileKey = `${info.path}:${info.size}`;
-      setCurrentTrack(info);
-      setIsPlaying(false);
-      setCurrentTime(initialPosition);
+    async (info: AudioFileInfo, initialPosition?: number) => {
+      // 1. Flush outgoing track's state before switching
+      if (autosaveTimerRef.current) {
+        window.clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
+      if (activeFileKeyRef.current) {
+        flushFileStateToStorage(activeFileKeyRef.current);
+      }
 
-      // Restore per-file DSP, Bookmarks & Language Mode (defaults to Dhivehi 'dv')
-      const savedLang = localStorage.getItem(`m0sh-lang:${fileKey}`);
+      const fileKey = getNormalizedFileKey(info);
+      const legacyKey = `${info.path}:${info.size}`;
+      isHydratingTrackRef.current = true;
+      activeFileKeyRef.current = fileKey;
+
+      // 2. Restore per-file DSP, Bookmarks, Language Mode, Font Size & Loop state (or reset to clean defaults)
+      let nextDsp: DspSettings = { ...DEFAULT_DSP_SETTINGS };
+      let nextBookmarks: number[] = [];
+      let nextLang: LanguageMode = "dv";
+      let nextFontSize = 16;
+      let nextLoop = false;
+
+      const savedLang =
+        localStorage.getItem(`m0sh-lang:${fileKey}`) ??
+        localStorage.getItem(`m0sh-lang:${legacyKey}`);
       if (savedLang === "en" || savedLang === "dv") {
-        setLangMode(savedLang);
-      } else {
-        setLangMode("dv");
+        nextLang = savedLang;
       }
 
       try {
-        const savedMeta = localStorage.getItem(`m0sh-dsp:${fileKey}`);
+        const savedMeta =
+          localStorage.getItem(`m0sh-dsp:${fileKey}`) ??
+          localStorage.getItem(`m0sh-dsp:${legacyKey}`);
         if (savedMeta) {
           const parsed = JSON.parse(savedMeta);
-          if (parsed.dsp) setDsp({ ...DEFAULT_DSP_SETTINGS, ...parsed.dsp });
-          if (Array.isArray(parsed.bookmarks)) setBookmarks(parsed.bookmarks);
+          if (parsed.dsp) {
+            nextDsp = { ...DEFAULT_DSP_SETTINGS, ...parsed.dsp };
+          }
+          if (Array.isArray(parsed.bookmarks)) {
+            nextBookmarks = parsed.bookmarks;
+          }
           if (
             !savedLang &&
             (parsed.langMode === "en" || parsed.langMode === "dv")
           ) {
-            setLangMode(parsed.langMode);
+            nextLang = parsed.langMode;
           }
-        } else {
-          setBookmarks([]);
+          if (
+            typeof parsed.fontSize === "number" &&
+            parsed.fontSize >= 13 &&
+            parsed.fontSize <= 28
+          ) {
+            nextFontSize = parsed.fontSize;
+          }
+          if (typeof parsed.loopEnabled === "boolean") {
+            nextLoop = parsed.loopEnabled;
+          }
         }
       } catch {
-        setBookmarks([]);
+        // Use clean defaults on parse error
       }
 
-      // Restore per-file Transcript if present
-      const savedTranscript = localStorage.getItem(`m0sh-transcript:${fileKey}`);
-      if (savedTranscript !== null && savedTranscript.length > 0) {
-        setTranscript(savedTranscript);
-      }
+      // 3. Restore per-file Transcript (or reset to empty "" so placeholder text shows!)
+      const savedTranscript =
+        localStorage.getItem(`m0sh-transcript:${fileKey}`) ??
+        localStorage.getItem(`m0sh-transcript:${legacyKey}`) ??
+        "";
+
+      // 4. Restore per-file Playback Position
+      const savedPosRaw = Number(
+        localStorage.getItem(`m0sh-pos:${fileKey}`) ??
+          localStorage.getItem(`m0sh-pos:${legacyKey}`)
+      );
+      const savedPos =
+        Number.isFinite(savedPosRaw) && savedPosRaw > 0 ? savedPosRaw : 0;
+      const targetPosition =
+        initialPosition !== undefined && initialPosition > 0
+          ? initialPosition
+          : savedPos;
+
+      selectionRef.current = {
+        start: savedTranscript.length,
+        end: savedTranscript.length,
+        direction: "none",
+      };
+
+      setCurrentTrack(info);
+      setIsPlaying(false);
+      setDsp(nextDsp);
+      setBookmarks(nextBookmarks);
+      setLangMode(nextLang);
+      setFontSize(nextFontSize);
+      setLoopEnabled(nextLoop);
+      setTranscript(savedTranscript);
+      setCurrentTime(targetPosition);
+      currentTimeRef.current = targetPosition;
+
+      window.setTimeout(() => {
+        isHydratingTrackRef.current = false;
+      }, 0);
 
       if (audioRef.current) {
         audioRef.current.src = info.streamUrl;
         audioRef.current.load();
         const onLoaded = () => {
-          if (audioRef.current && initialPosition > 0) {
-            audioRef.current.currentTime = Math.min(
-              initialPosition,
-              audioRef.current.duration || initialPosition
+          if (audioRef.current && targetPosition > 0) {
+            const clampedPos = Math.min(
+              targetPosition,
+              audioRef.current.duration || targetPosition
             );
+            audioRef.current.currentTime = clampedPos;
+            setCurrentTime(clampedPos);
+            currentTimeRef.current = clampedPos;
           }
-          engineRef.current?.applyAllSettings(dsp);
+          engineRef.current?.applyAllSettings(nextDsp);
           audioRef.current?.removeEventListener("loadedmetadata", onLoaded);
         };
         audioRef.current.addEventListener("loadedmetadata", onLoaded);
@@ -581,7 +708,7 @@ export default function App() {
         setWaveformLoadingProgress(null);
       }
     },
-    [dsp]
+    [flushFileStateToStorage, getNormalizedFileKey]
   );
 
   // Startup Restoration, Waveform Progress Listener, Native File Drop & Mandatory Self-Updater
@@ -649,7 +776,7 @@ export default function App() {
           if (!/\.(mp3|wav)$/i.test(droppedPath)) return;
           try {
             const info = await registerAudioPath(droppedPath);
-            await loadAudioFileInfo(info, 0);
+            await loadAudioFileInfo(info);
           } catch {
             // Ignore invalid drop
           }
@@ -740,7 +867,11 @@ export default function App() {
     audio.pause();
     audio.currentTime = 0;
     setCurrentTime(0);
+    currentTimeRef.current = 0;
     setIsPlaying(false);
+    if (activeFileKeyRef.current !== "unloaded") {
+      localStorage.setItem(`m0sh-pos:${activeFileKeyRef.current}`, "0");
+    }
     void savePlaybackPosition(0);
     restoreEditorFocus();
   }, [restoreEditorFocus]);
@@ -755,6 +886,13 @@ export default function App() {
       );
       audio.currentTime = target;
       setCurrentTime(target);
+      currentTimeRef.current = target;
+      if (activeFileKeyRef.current !== "unloaded") {
+        localStorage.setItem(
+          `m0sh-pos:${activeFileKeyRef.current}`,
+          String(target)
+        );
+      }
       void savePlaybackPosition(target);
       restoreEditorFocus();
     },
@@ -770,6 +908,13 @@ export default function App() {
       const target = Math.max(0, Math.min(total, ratio * total));
       audio.currentTime = target;
       setCurrentTime(target);
+      currentTimeRef.current = target;
+      if (activeFileKeyRef.current !== "unloaded") {
+        localStorage.setItem(
+          `m0sh-pos:${activeFileKeyRef.current}`,
+          String(target)
+        );
+      }
     },
     [currentTrack, duration]
   );
@@ -1035,7 +1180,7 @@ export default function App() {
   const handleOpenAudioClick = async () => {
     const info = await openAudioDialog();
     if (info) {
-      await loadAudioFileInfo(info, 0);
+      await loadAudioFileInfo(info);
       restoreEditorFocus();
       return;
     }
@@ -1048,33 +1193,48 @@ export default function App() {
       const file = input.files?.[0];
       if (!file) return;
       const url = URL.createObjectURL(file);
-      await loadAudioFileInfo(
-        {
-          name: file.name,
-          path: file.name,
-          size: file.size,
-          mtimeMs: file.lastModified,
-          streamUrl: url,
-        },
-        0
-      );
+      await loadAudioFileInfo({
+        name: file.name,
+        path: file.name,
+        size: file.size,
+        mtimeMs: file.lastModified,
+        streamUrl: url,
+      });
       restoreEditorFocus();
     };
     input.click();
   };
 
   const handleUnloadAudio = async () => {
+    if (autosaveTimerRef.current) {
+      window.clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
+    }
+    if (activeFileKeyRef.current && activeFileKeyRef.current !== "unloaded") {
+      flushFileStateToStorage(activeFileKeyRef.current);
+    }
+    isHydratingTrackRef.current = true;
+    activeFileKeyRef.current = "unloaded";
+
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.removeAttribute("src");
       audioRef.current.load();
     }
+    selectionRef.current = { start: 0, end: 0, direction: "none" };
     setCurrentTrack(null);
     setIsPlaying(false);
     setCurrentTime(0);
+    currentTimeRef.current = 0;
     setDuration(0);
+    setDsp({ ...DEFAULT_DSP_SETTINGS });
     setBookmarks([]);
+    setLoopEnabled(false);
+    setTranscript("");
     setWaveformPeaks(defaultWaveformBins(512));
+    window.setTimeout(() => {
+      isHydratingTrackRef.current = false;
+    }, 0);
     await clearLastAudio();
     restoreEditorFocus();
   };
@@ -1315,12 +1475,35 @@ export default function App() {
         onTimeUpdate={(e) => {
           const t = e.currentTarget.currentTime;
           setCurrentTime(t);
+          currentTimeRef.current = t;
+          const now = performance.now();
+          if (
+            activeFileKeyRef.current !== "unloaded" &&
+            now - lastPosSaveMsRef.current > 1000
+          ) {
+            lastPosSaveMsRef.current = now;
+            localStorage.setItem(
+              `m0sh-pos:${activeFileKeyRef.current}`,
+              String(t)
+            );
+            void savePlaybackPosition(t);
+          }
         }}
         onLoadedMetadata={(e) => {
           setDuration(e.currentTarget.duration || 0);
         }}
         onPlay={() => setIsPlaying(true)}
-        onPause={() => setIsPlaying(false)}
+        onPause={(e) => {
+          setIsPlaying(false);
+          const t = e.currentTarget.currentTime;
+          if (activeFileKeyRef.current !== "unloaded") {
+            localStorage.setItem(
+              `m0sh-pos:${activeFileKeyRef.current}`,
+              String(t)
+            );
+            void savePlaybackPosition(t);
+          }
+        }}
         onEnded={() => {
           if (!loopEnabled) setIsPlaying(false);
         }}
@@ -1792,16 +1975,13 @@ export default function App() {
                   const file = e.dataTransfer.files?.[0];
                   if (!file) return;
                   const url = URL.createObjectURL(file);
-                  await loadAudioFileInfo(
-                    {
-                      name: file.name,
-                      path: file.name,
-                      size: file.size,
-                      mtimeMs: file.lastModified,
-                      streamUrl: url,
-                    },
-                    0
-                  );
+                  await loadAudioFileInfo({
+                    name: file.name,
+                    path: file.name,
+                    size: file.size,
+                    mtimeMs: file.lastModified,
+                    streamUrl: url,
+                  });
                 }}
               >
                 {/* 1. File Identity & Actions Bar */}
@@ -2139,6 +2319,8 @@ export default function App() {
 
                 <textarea
                   ref={editorRef}
+                  dir={langMode === "dv" ? "rtl" : "ltr"}
+                  lang={langMode === "dv" ? "dv" : "en"}
                   className={`transcript-textarea ${langMode === "dv" ? "lang-dv" : "lang-en"
                     }`}
                   style={{ fontSize: `${fontSize}px` }}
@@ -2493,6 +2675,10 @@ export default function App() {
                   if (result.saved) {
                     selectionRef.current = { start: 0, end: 0, direction: "none" };
                     setTranscript("");
+                    localStorage.setItem(
+                      `m0sh-transcript:${currentFileKey}`,
+                      ""
+                    );
                     setClearTranscriptModalOpen(false);
                     if (result.path) {
                       setStatusMessage(
@@ -2514,6 +2700,7 @@ export default function App() {
                 onClick={() => {
                   selectionRef.current = { start: 0, end: 0, direction: "none" };
                   setTranscript("");
+                  localStorage.setItem(`m0sh-transcript:${currentFileKey}`, "");
                   setClearTranscriptModalOpen(false);
                   setStatusMessage("Transcript cleared");
                 }}

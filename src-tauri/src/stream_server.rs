@@ -1,4 +1,3 @@
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
@@ -7,6 +6,18 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::OnceCell;
+
+fn hash_path_token(bytes: &[u8]) -> String {
+    let mut h1: u64 = 0xcbf29ce484222325;
+    let mut h2: u64 = 0x84222325cbf29ce4;
+    for (i, &b) in bytes.iter().enumerate() {
+        h1 ^= b as u64;
+        h1 = h1.wrapping_mul(0x100000001b3);
+        h2 ^= (b as u64).wrapping_add(i as u64);
+        h2 = h2.wrapping_mul(0x100000001b3);
+    }
+    format!("{:016x}{:016x}", h1, h2)
+}
 
 #[derive(Clone, Default)]
 pub struct StreamRegistry {
@@ -21,9 +32,7 @@ impl StreamRegistry {
     }
 
     pub fn register_file(&self, path: &Path) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(path.to_string_lossy().as_bytes());
-        let token = hex::encode(&hasher.finalize()[..16]);
+        let token = hash_path_token(path.to_string_lossy().as_bytes());
         if let Ok(mut guard) = self.tokens.write() {
             guard.insert(token.clone(), path.to_path_buf());
         }
@@ -52,6 +61,7 @@ pub async fn ensure_stream_server(registry: StreamRegistry) -> Result<u16, Strin
             tokio::spawn(async move {
                 loop {
                     if let Ok((socket, _)) = listener.accept().await {
+                        let _ = socket.set_nodelay(true);
                         let reg = registry.clone();
                         tokio::spawn(async move {
                             let _ = handle_client(socket, reg).await;

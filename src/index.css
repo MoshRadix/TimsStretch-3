@@ -869,6 +869,11 @@ textarea {
   border-color: var(--accent-primary);
 }
 
+.transcript-textarea::placeholder {
+  color: var(--text-muted);
+  opacity: 0.85;
+}
+
 .transcript-textarea.lang-en {
   direction: ltr;
   text-align: left;
@@ -880,6 +885,12 @@ textarea {
   text-align: right;
   font-family: "Faruma", "FarumaArabic", "MV Boli", "MV Waheed", sans-serif;
   line-height: 1.85;
+}
+
+.transcript-textarea.lang-dv::placeholder {
+  direction: rtl;
+  text-align: right;
+  font-family: "Faruma", "FarumaArabic", "MV Boli", "MV Waheed", sans-serif;
 }
 
 .editor-statusbar {
