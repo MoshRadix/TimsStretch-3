@@ -82,6 +82,8 @@ export class LiveWavRecorder {
   private sampleRate = 44100;
   private status: RecorderStatus = "ready";
   private micGain = 1.5; // Default 150% (+3.5 dB) boost for low raw mic inputs
+  private smoothedPercent = 0;
+  private smoothedPeakPercent = 0;
   private onMeterCallback?: (frame: RecorderMeterFrame) => void;
 
   public setMicGain(gain: number): void {
@@ -120,7 +122,7 @@ export class LiveWavRecorder {
     this.sampleRate = this.audioCtx.sampleRate || 44100;
 
     this.sourceNode = this.audioCtx.createMediaStreamSource(this.stream);
-    this.processorNode = this.audioCtx.createScriptProcessor(2048, 1, 1);
+    this.processorNode = this.audioCtx.createScriptProcessor(1024, 1, 1);
     this.silentGain = this.audioCtx.createGain();
     this.silentGain.gain.value = 0;
 
@@ -167,13 +169,28 @@ export class LiveWavRecorder {
       // Responsive studio meter curve (-52 dB floor to 0 dB ceiling, weighted with peak)
       const rmsNorm = Math.max(0, Math.min(100, ((rmsDb + 52) / 52) * 100));
       const peakNorm = Math.max(0, Math.min(100, ((peakDb + 52) / 52) * 100));
-      const percent = Math.min(100, rmsNorm * 0.65 + peakNorm * 0.35);
+      const rawPercent = Math.min(100, rmsNorm * 0.65 + peakNorm * 0.35);
+
+      // Instant attack, smooth ballistic decay
+      if (rawPercent >= this.smoothedPercent) {
+        this.smoothedPercent = rawPercent;
+      } else {
+        this.smoothedPercent = Math.max(rawPercent, this.smoothedPercent * 0.78);
+        if (this.smoothedPercent < 0.4) this.smoothedPercent = 0;
+      }
+
+      if (peakNorm >= this.smoothedPeakPercent) {
+        this.smoothedPeakPercent = peakNorm;
+      } else {
+        this.smoothedPeakPercent = Math.max(peakNorm, this.smoothedPeakPercent * 0.91);
+        if (this.smoothedPeakPercent < 0.4) this.smoothedPeakPercent = 0;
+      }
 
       this.onMeterCallback?.({
         rmsDb,
         peakDb,
-        percent,
-        peakPercent: peakNorm,
+        percent: this.smoothedPercent,
+        peakPercent: this.smoothedPeakPercent,
         clipping: clipped,
         elapsedSeconds: this.totalSamples / this.sampleRate,
       });

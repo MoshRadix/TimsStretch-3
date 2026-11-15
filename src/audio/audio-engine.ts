@@ -71,7 +71,8 @@ export class MoshAudioEngine {
   // Master Volume + Real-time Analyser
   private masterGain: GainNode | null = null;
   private analyser: AnalyserNode | null = null;
-  private timeDomainBuf: Float32Array<ArrayBuffer> = new Float32Array(new ArrayBuffer(1024 * 4));
+  private timeDomainBuf: Float32Array<ArrayBuffer> = new Float32Array(new ArrayBuffer(512 * 4));
+  private smoothedPercent = 0;
 
   private settings: DspSettings = { ...DEFAULT_DSP_SETTINGS };
   private isGraphReady = false;
@@ -232,8 +233,8 @@ export class MoshAudioEngine {
     // Master Volume -> Analyser -> Destination
     this.masterGain = ctx.createGain();
     this.analyser = ctx.createAnalyser();
-    this.analyser.fftSize = 1024;
-    this.analyser.smoothingTimeConstant = 0.8;
+    this.analyser.fftSize = 512;
+    this.analyser.smoothingTimeConstant = 0.25;
     this.timeDomainBuf = new Float32Array(new ArrayBuffer(this.analyser.fftSize * 4));
 
     this.vcOutSum.connect(this.masterGain);
@@ -322,6 +323,7 @@ export class MoshAudioEngine {
 
   public getOutputLevels(): OutputLevels {
     if (!this.analyser || this.audioElement.paused) {
+      this.smoothedPercent = 0;
       return { rmsDb: -60, peakDb: -60, percent: 0 };
     }
 
@@ -340,8 +342,20 @@ export class MoshAudioEngine {
     const rms = Math.sqrt(sumSq / len);
     const rmsDb = rms > 1e-5 ? Math.max(-60, Math.min(0, 20 * Math.log10(rms))) : -60;
     const peakDb = peak > 1e-5 ? Math.max(-60, Math.min(0, 20 * Math.log10(peak))) : -60;
-    const percent = Math.max(0, Math.min(100, ((rmsDb + 60) / 60) * 100));
 
-    return { rmsDb, peakDb, percent };
+    // Responsive studio meter curve (-52 dB floor to 0 dB ceiling, weighted with peak)
+    const rmsNorm = Math.max(0, Math.min(100, ((rmsDb + 52) / 52) * 100));
+    const peakNorm = Math.max(0, Math.min(100, ((peakDb + 52) / 52) * 100));
+    const targetPercent = Math.min(100, rmsNorm * 0.65 + peakNorm * 0.35);
+
+    // Instant attack on transients, smooth ballistic release decay
+    if (targetPercent >= this.smoothedPercent) {
+      this.smoothedPercent = targetPercent;
+    } else {
+      this.smoothedPercent = Math.max(targetPercent, this.smoothedPercent * 0.84);
+      if (this.smoothedPercent < 0.4) this.smoothedPercent = 0;
+    }
+
+    return { rmsDb, peakDb, percent: this.smoothedPercent };
   }
 }

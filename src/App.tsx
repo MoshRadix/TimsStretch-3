@@ -299,11 +299,14 @@ export default function App() {
   // DSP Settings & Bookmarks
   const [dsp, setDsp] = useState<DspSettings>({ ...DEFAULT_DSP_SETTINGS });
   const [bookmarks, setBookmarks] = useState<number[]>([]);
-  const [outputLevels, setOutputLevels] = useState<OutputLevels>({
+  const [outputLevels] = useState<OutputLevels>({
     rmsDb: -60,
     peakDb: -60,
     percent: 0,
   });
+  const outputMeterFillRef = useRef<HTMLDivElement | null>(null);
+  const outputMeterReadoutRef = useRef<HTMLSpanElement | null>(null);
+  const currentTimeRef = useRef<number>(0);
 
   // Bilingual Transcription Editor State
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
@@ -883,21 +886,51 @@ export default function App() {
     return () => window.removeEventListener("keydown", onWindowKeyDown);
   }, [shortcuts, capturingShortcutKey, executeShortcutAction]);
 
-  // 60fps Canvas Waveform Renderer & Output Level Meter Loop
+  // 60fps Canvas Waveform Renderer & Zero-Lag Output Level Meter Loop
+  useEffect(() => {
+    currentTimeRef.current = currentTime;
+  }, [currentTime]);
+
   useEffect(() => {
     let rafId = 0;
+    let lastStateTimeUpdateMs = 0;
+    let lastReadoutUpdateMs = 0;
+    let lastDrawnTime = -1;
+    let lastDrawnW = 0;
+    let lastDrawnH = 0;
+    let wasPaused = true;
 
-    const renderFrame = () => {
+    const renderFrame = (nowMs: number) => {
       const audio = audioRef.current;
-      if (audio && !audio.paused) {
-        setCurrentTime(audio.currentTime);
-        if (engineRef.current) {
-          setOutputLevels(engineRef.current.getOutputLevels());
+      const isPaused = !audio || audio.paused;
+
+      if (!isPaused && engineRef.current) {
+        const curT = audio.currentTime;
+        currentTimeRef.current = curT;
+
+        // Throttle React state updates for MM:SS readout (~8 Hz) so 60fps meter/canvas never blocks on full React tree re-renders
+        if (nowMs - lastStateTimeUpdateMs >= 120) {
+          lastStateTimeUpdateMs = nowMs;
+          setCurrentTime(curT);
         }
-      } else {
-        setOutputLevels((prev) =>
-          prev.percent === 0 ? prev : { rmsDb: -60, peakDb: -60, percent: 0 }
-        );
+
+        const levels = engineRef.current.getOutputLevels();
+        if (outputMeterFillRef.current) {
+          outputMeterFillRef.current.style.width = `${levels.percent.toFixed(1)}%`;
+        }
+        if (outputMeterReadoutRef.current && nowMs - lastReadoutUpdateMs >= 50) {
+          lastReadoutUpdateMs = nowMs;
+          outputMeterReadoutRef.current.textContent = `RMS ${levels.rmsDb.toFixed(1)} dB · Peak ${levels.peakDb.toFixed(1)} dB`;
+        }
+        wasPaused = false;
+      } else if (!wasPaused) {
+        wasPaused = true;
+        if (outputMeterFillRef.current) {
+          outputMeterFillRef.current.style.width = "0%";
+        }
+        if (outputMeterReadoutRef.current) {
+          outputMeterReadoutRef.current.textContent = "RMS -60.0 dB · Peak -60.0 dB";
+        }
       }
 
       const canvas = waveformCanvasRef.current;
@@ -906,78 +939,88 @@ export default function App() {
         const rect = canvas.getBoundingClientRect();
         const targetW = Math.max(1, Math.floor(rect.width * dpr));
         const targetH = Math.max(1, Math.floor(rect.height * dpr));
-        if (canvas.width !== targetW || canvas.height !== targetH) {
-          canvas.width = targetW;
-          canvas.height = targetH;
-        }
+        const curTime = audio && !audio.paused ? audio.currentTime : currentTimeRef.current;
 
-        const ctx = canvas.getContext("2d");
-        if (ctx) {
-          ctx.save();
-          ctx.scale(dpr, dpr);
-          const w = rect.width;
-          const h = rect.height;
-          ctx.clearRect(0, 0, w, h);
+        const sizeChanged = targetW !== lastDrawnW || targetH !== lastDrawnH;
+        const timeChanged = Math.abs(curTime - lastDrawnTime) > 0.002;
 
-          // Cached theme palette (never calls getComputedStyle per frame)
-          const palette = WAVEFORM_THEME_COLORS[theme];
-          const bins = waveformPeaks.length || 512;
-          const totalDur = audio?.duration || duration || 0;
-          const curTime = audio?.currentTime ?? currentTime;
-          const progressRatio =
-            totalDur > 0 ? Math.max(0, Math.min(1, curTime / totalDur)) : 0;
+        if (sizeChanged || timeChanged || !isPaused) {
+          lastDrawnW = targetW;
+          lastDrawnH = targetH;
+          lastDrawnTime = curTime;
 
-          const barStep = w / bins;
-          const barWidth = Math.max(1.2, barStep * 0.66);
-          const midY = h / 2;
-
-          for (let i = 0; i < bins; i++) {
-            const amp = Math.max(0.05, Math.min(1.0, waveformPeaks[i] ?? 0.1));
-            const barH = Math.max(4, amp * (h - 14));
-            const x = i * barStep + (barStep - barWidth) * 0.5;
-            const y = midY - barH * 0.5;
-            const binRatio = (i + 0.5) / bins;
-
-            ctx.fillStyle =
-              binRatio <= progressRatio ? palette.played : palette.unplayed;
-            ctx.beginPath();
-            ctx.roundRect(x, y, barWidth, barH, 1.5);
-            ctx.fill();
+          if (canvas.width !== targetW || canvas.height !== targetH) {
+            canvas.width = targetW;
+            canvas.height = targetH;
           }
 
-          // Bookmark Pins with Top Triangles
-          if (totalDur > 0 && bookmarks.length > 0) {
-            ctx.fillStyle = palette.bookmark;
-            ctx.strokeStyle = palette.bookmark;
-            ctx.lineWidth = 1.5;
-            for (const bm of bookmarks) {
-              const bx = Math.max(2, Math.min(w - 2, (bm / totalDur) * w));
-              ctx.beginPath();
-              ctx.moveTo(bx, 0);
-              ctx.lineTo(bx, h);
-              ctx.stroke();
+          const ctx = canvas.getContext("2d");
+          if (ctx) {
+            ctx.save();
+            ctx.scale(dpr, dpr);
+            const w = rect.width;
+            const h = rect.height;
+            ctx.clearRect(0, 0, w, h);
 
+            // Cached theme palette (never calls getComputedStyle per frame)
+            const palette = WAVEFORM_THEME_COLORS[theme];
+            const bins = waveformPeaks.length || 512;
+            const totalDur = audio?.duration || duration || 0;
+            const progressRatio =
+              totalDur > 0 ? Math.max(0, Math.min(1, curTime / totalDur)) : 0;
+
+            const barStep = w / bins;
+            const barWidth = Math.max(1.2, barStep * 0.66);
+            const midY = h / 2;
+
+            for (let i = 0; i < bins; i++) {
+              const amp = Math.max(0.05, Math.min(1.0, waveformPeaks[i] ?? 0.1));
+              const barH = Math.max(4, amp * (h - 14));
+              const x = i * barStep + (barStep - barWidth) * 0.5;
+              const y = midY - barH * 0.5;
+              const binRatio = (i + 0.5) / bins;
+
+              ctx.fillStyle =
+                binRatio <= progressRatio ? palette.played : palette.unplayed;
               ctx.beginPath();
-              ctx.moveTo(bx - 4, 0);
-              ctx.lineTo(bx + 4, 0);
-              ctx.lineTo(bx, 6);
-              ctx.closePath();
+              ctx.roundRect(x, y, barWidth, barH, 1.5);
               ctx.fill();
             }
-          }
 
-          // Crisp Playhead Line
-          if (totalDur > 0) {
-            const px = Math.max(1, Math.min(w - 1, progressRatio * w));
-            ctx.strokeStyle = palette.playhead;
-            ctx.lineWidth = 1.8;
-            ctx.beginPath();
-            ctx.moveTo(px, 0);
-            ctx.lineTo(px, h);
-            ctx.stroke();
-          }
+            // Bookmark Pins with Top Triangles
+            if (totalDur > 0 && bookmarks.length > 0) {
+              ctx.fillStyle = palette.bookmark;
+              ctx.strokeStyle = palette.bookmark;
+              ctx.lineWidth = 1.5;
+              for (const bm of bookmarks) {
+                const bx = Math.max(2, Math.min(w - 2, (bm / totalDur) * w));
+                ctx.beginPath();
+                ctx.moveTo(bx, 0);
+                ctx.lineTo(bx, h);
+                ctx.stroke();
 
-          ctx.restore();
+                ctx.beginPath();
+                ctx.moveTo(bx - 4, 0);
+                ctx.lineTo(bx + 4, 0);
+                ctx.lineTo(bx, 6);
+                ctx.closePath();
+                ctx.fill();
+              }
+            }
+
+            // Crisp Playhead Line
+            if (totalDur > 0) {
+              const px = Math.max(1, Math.min(w - 1, progressRatio * w));
+              ctx.strokeStyle = palette.playhead;
+              ctx.lineWidth = 1.8;
+              ctx.beginPath();
+              ctx.moveTo(px, 0);
+              ctx.lineTo(px, h);
+              ctx.stroke();
+            }
+
+            ctx.restore();
+          }
         }
       }
 
@@ -986,7 +1029,7 @@ export default function App() {
 
     rafId = requestAnimationFrame(renderFrame);
     return () => cancelAnimationFrame(rafId);
-  }, [theme, waveformPeaks, bookmarks, duration, currentTime]);
+  }, [theme, waveformPeaks, bookmarks, duration, activePage]);
 
   // Open Audio File Dialog or Browser Fallback
   const handleOpenAudioClick = async () => {
@@ -1067,7 +1110,8 @@ export default function App() {
   };
 
   const handleInsertTimestamp = () => {
-    const stamp = `[${formatTime(currentTime)}] `;
+    const exactTime = audioRef.current?.currentTime ?? currentTime;
+    const stamp = `[${formatTime(exactTime)}] `;
     const el = editorRef.current;
     const start = el ? el.selectionStart : selectionRef.current.start;
     const end = el ? el.selectionEnd : selectionRef.current.end;
@@ -1717,13 +1761,14 @@ export default function App() {
               <div className="dsp-card">
                 <div className="card-header">
                   <span className="card-title">Output Level</span>
-                  <span className="meter-readout">
+                  <span ref={outputMeterReadoutRef} className="meter-readout">
                     RMS {outputLevels.rmsDb.toFixed(1)} dB · Peak{" "}
                     {outputLevels.peakDb.toFixed(1)} dB
                   </span>
                 </div>
                 <div className="meter-bar-track">
                   <div
+                    ref={outputMeterFillRef}
                     className="meter-bar-fill"
                     style={{ width: `${outputLevels.percent.toFixed(1)}%` }}
                   />
@@ -1940,7 +1985,8 @@ export default function App() {
                       type="button"
                       className="flat-transport-btn"
                       onClick={() => {
-                        const t = Number(currentTime.toFixed(1));
+                        const exactTime = audioRef.current?.currentTime ?? currentTime;
+                        const t = Number(exactTime.toFixed(1));
                         setBookmarks((prev) =>
                           prev.some((b) => Math.abs(b - t) < 0.3)
                             ? prev
@@ -2219,7 +2265,6 @@ export default function App() {
                         : recorderLevelPercent > 82
                         ? "#f59e0b"
                         : "var(--accent-primary)",
-                      transition: "width 55ms linear",
                     }}
                   />
                   {recorderPeakPercent > 2 && (
