@@ -17,6 +17,9 @@ src-tauri/*.key
 src-tauri/tauri-updater.key*
 .env
 .env.*
+.agents/
+skills-lock.json
+design-plans/
 
 # OS / Editor files
 .DS_Store

@@ -2091,6 +2091,7 @@ export default function App() {
                       type="button"
                       className="flat-transport-btn"
                       title="Seek Backward 3 seconds"
+                      disabled={!currentTrack}
                       onClick={() => handleSeekRelative(-3)}
                     >
                       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
@@ -2104,6 +2105,7 @@ export default function App() {
                       type="button"
                       className="flat-play-btn"
                       title="Play / Pause"
+                      disabled={!currentTrack}
                       onClick={handleTogglePlay}
                     >
                       {isPlaying ? (
@@ -2122,6 +2124,7 @@ export default function App() {
                       type="button"
                       className="flat-transport-btn"
                       title="Stop & Reset to 0:00"
+                      disabled={!currentTrack}
                       onClick={handleStopPlayback}
                     >
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
@@ -2134,6 +2137,7 @@ export default function App() {
                       type="button"
                       className="flat-transport-btn"
                       title="Seek Forward 3 seconds"
+                      disabled={!currentTrack}
                       onClick={() => handleSeekRelative(3)}
                     >
                       +3s
@@ -2148,6 +2152,7 @@ export default function App() {
                       className={`flat-transport-btn ${loopEnabled ? "active" : ""
                         }`}
                       title="Toggle Loop"
+                      disabled={!currentTrack}
                       onClick={() => setLoopEnabled((v) => !v)}
                     >
                       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
@@ -2164,6 +2169,7 @@ export default function App() {
                     <button
                       type="button"
                       className="flat-transport-btn"
+                      disabled={!currentTrack}
                       onClick={() => {
                         const exactTime = audioRef.current?.currentTime ?? currentTime;
                         const t = Number(exactTime.toFixed(1));
@@ -2445,7 +2451,7 @@ export default function App() {
                       background: recorderClipping
                         ? "var(--accent-danger)"
                         : recorderLevelPercent > 82
-                        ? "#f59e0b"
+                        ? "var(--accent-amber)"
                         : "var(--accent-primary)",
                     }}
                   />

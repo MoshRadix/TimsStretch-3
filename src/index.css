@@ -36,6 +36,7 @@
   --text-secondary: #475569;
   --text-muted: #64748b;
   --accent-primary: #0d9488;
+  --accent-primary-tint: rgba(13, 148, 136, 0.14);
   --accent-secondary: #0284c7;
   --accent-slash: #e11d48;
   --accent-amber: #d97706;
@@ -64,6 +65,7 @@
   --text-secondary: #94a3b8;
   --text-muted: #64748b;
   --accent-primary: #22d3ee;
+  --accent-primary-tint: rgba(34, 211, 238, 0.15);
   --accent-secondary: #0ea5e9;
   --accent-slash: #ff5722;
   --accent-amber: #fbbf24;
@@ -146,11 +148,9 @@ textarea {
   width: 24px;
   height: 24px;
   border-radius: 6px;
-  background: radial-gradient(
-      circle at 30% 30%,
+  background: radial-gradient(circle at 30% 30%,
       rgba(34, 211, 238, 0.24),
-      rgba(13, 148, 136, 0.06) 72%
-    ),
+      rgba(13, 148, 136, 0.06) 72%),
     var(--bg-card-elevated);
   border: 1px solid var(--border-strong);
   display: inline-flex;
@@ -219,7 +219,7 @@ textarea {
   font-weight: 700;
   padding: 3px 10px;
   border-radius: 999px;
-  background: rgba(34, 211, 238, 0.14);
+  background: var(--accent-primary-tint);
   border: 1px solid var(--accent-primary);
   color: var(--accent-primary);
   cursor: pointer;
@@ -386,25 +386,21 @@ textarea {
 }
 
 .unipolar-slider {
-  background: linear-gradient(
-    to right,
-    var(--accent-primary) 0%,
-    var(--accent-primary) var(--slider-fill, 50%),
-    var(--slider-track) var(--slider-fill, 50%),
-    var(--slider-track) 100%
-  );
+  background: linear-gradient(to right,
+      var(--accent-primary) 0%,
+      var(--accent-primary) var(--slider-fill, 50%),
+      var(--slider-track) var(--slider-fill, 50%),
+      var(--slider-track) 100%);
 }
 
 .bipolar-slider {
-  background: linear-gradient(
-    to right,
-    var(--slider-track) 0%,
-    var(--slider-track) var(--fill-start, 50%),
-    var(--accent-primary) var(--fill-start, 50%),
-    var(--accent-primary) calc(var(--fill-start, 50%) + var(--fill-width, 0%)),
-    var(--slider-track) calc(var(--fill-start, 50%) + var(--fill-width, 0%)),
-    var(--slider-track) 100%
-  );
+  background: linear-gradient(to right,
+      var(--slider-track) 0%,
+      var(--slider-track) var(--fill-start, 50%),
+      var(--accent-primary) var(--fill-start, 50%),
+      var(--accent-primary) calc(var(--fill-start, 50%) + var(--fill-width, 0%)),
+      var(--slider-track) calc(var(--fill-start, 50%) + var(--fill-width, 0%)),
+      var(--slider-track) 100%);
 }
 
 .unipolar-slider::-webkit-slider-thumb,
@@ -455,7 +451,7 @@ textarea {
 }
 
 .preset-pill.active {
-  background: rgba(34, 211, 238, 0.15);
+  background: var(--accent-primary-tint);
   border-color: var(--accent-primary);
   color: var(--accent-primary);
 }
@@ -503,7 +499,7 @@ textarea {
 }
 
 .enhance-toggle.active {
-  background: rgba(34, 211, 238, 0.14);
+  background: var(--accent-primary-tint);
   border-color: var(--accent-primary);
 }
 
@@ -649,7 +645,7 @@ textarea {
   border-radius: 4px;
   font-size: 10px;
   font-weight: 600;
-  background: rgba(13, 20, 33, 0.85);
+  background: var(--bg-card-elevated);
   border: 1px solid var(--accent-primary);
   color: var(--accent-primary);
   pointer-events: none;
@@ -711,7 +707,7 @@ textarea {
 }
 
 .flat-transport-btn.active {
-  background: rgba(34, 211, 238, 0.16);
+  background: var(--accent-primary-tint);
   border-color: var(--accent-primary);
   color: var(--accent-primary);
 }
@@ -730,8 +726,13 @@ textarea {
   cursor: pointer;
 }
 
-.flat-play-btn:hover {
+.flat-play-btn:hover:not(:disabled) {
   filter: brightness(1.06);
+}
+
+.flat-play-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* Structured DAW-Style Bookmarks Strip */
@@ -846,7 +847,7 @@ textarea {
 }
 
 .lang-pill.active {
-  background: rgba(34, 211, 238, 0.16);
+  background: var(--accent-primary-tint);
   border-color: var(--accent-primary);
   color: var(--accent-primary);
 }
